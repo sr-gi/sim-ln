@@ -2,6 +2,9 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::ln::PaymentHash;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use tokio::sync::mpsc;
+use tokio::time;
+use triggered::Listener;
 
 pub mod lnd;
 
@@ -47,21 +50,25 @@ pub trait LightningNode {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 enum NodeAction {
     // Dispatch a payment of the specified amount to the public key provided.
     SendPayment(PublicKey, u64),
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 struct Event {
     // The public key of the node executing this event.
     source: PublicKey,
-
-    // Offset is the time offset from the beginning of execution that this event should be executed.
-    offset: u64,
-
     // An action to be executed on the source node.
     action: NodeAction,
+}
+
+impl Event {
+    fn new(source: PublicKey, action: NodeAction) -> Self {
+        Event { source, action }
+    }
 }
 
 // Phase 3: CSV output
@@ -100,5 +107,21 @@ impl Simulation {
         );
         println!("42 and Done!");
         Ok(())
+    }
+}
+
+async fn produce_events(act: ActivityDefinition, sender: mpsc::Sender<Event>, shutdown: Listener) {
+    let e = Event::new(
+        act.source,
+        NodeAction::SendPayment(act.destination, act.amount_msat),
+    );
+    let interval = time::Duration::from_secs(act.frequency as u64);
+
+    loop {
+        if time::timeout(interval, shutdown.clone()).await.is_ok() {
+            println!("Received shutting down signal. Shutting down");
+            break;
+        }
+        let _ = sender.send(e).await;
     }
 }
