@@ -20,17 +20,18 @@ struct Cli {
     #[clap(long, short)]
     print_batch_size: Option<u32>,
     #[clap(long, short)]
-    log_level: LevelFilter,
+    log_level: Option<LevelFilter>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let log_level = cli.log_level.unwrap_or(LevelFilter::Info);
 
     SimpleLogger::new()
         .with_level(LevelFilter::Warn)
-        .with_module_level("sim_lib", cli.log_level)
-        .with_module_level("sim_cli", cli.log_level)
+        .with_module_level("sim_lib", log_level)
+        .with_module_level("sim_cli", log_level)
         .init()
         .unwrap();
 
