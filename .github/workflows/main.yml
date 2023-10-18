@@ -11,19 +11,11 @@ jobs:
     name: Check code formatting
     runs-on: ubuntu-latest
     steps:
-      - name: Install protoc
-        run: sudo apt install -y protobuf-compiler
-      - uses: actions/checkout@v3
-      - uses: actions-rs/cargo@v1
-        name: cargo fmt
+      - uses: actions/checkout@v1
+      - run: rustup component add clippy
+      - uses: actions-rs/clippy-check@v1
         with:
-          command: fmt
-          args: --check
-      - uses: actions-rs/cargo@v1
-        name: cargo clippy
-        with:
-          command: clippy
-          args: -- --deny warnings
+          args: --all-features  --all-targets --color always -- --deny warnings
 
   build:
     name: Build and test
