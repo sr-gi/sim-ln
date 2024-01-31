@@ -1,18 +1,24 @@
-use bitcoin::secp256k1::PublicKey;
+use anyhow::anyhow;
+use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+use clap::builder::TypedValueParser;
+use clap::Parser;
+use log::LevelFilter;
+use rand::distributions::Uniform;
+use rand::Rng;
+use sim_lib::{
+    cln::ClnNode,
+    lnd::LndNode,
+    sim_node::{
+        ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
+    },
+    ActivityDefinition, LightningError, LightningNode, NodeConnection, NodeId, SimParams,
+    Simulation, WriteResults,
+};
+use simple_logger::SimpleLogger;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-
-use anyhow::anyhow;
-use clap::builder::TypedValueParser;
-use clap::Parser;
-use log::LevelFilter;
-use sim_lib::{
-    cln::ClnNode, lnd::LndNode, ActivityDefinition, LightningError, LightningNode, NodeConnection,
-    NodeId, SimParams, Simulation, WriteResults,
-};
-use simple_logger::SimpleLogger;
 
 /// The default directory where the simulation files are stored and where the results will be written to.
 pub const DEFAULT_DATA_DIR: &str = ".";
@@ -189,7 +195,6 @@ async fn main() -> anyhow::Result<()> {
             amount_msat: act.amount_msat,
         });
     }
-
     let write_results = if !cli.no_results {
         Some(WriteResults {
             results_dir: mkdir(cli.data_dir.join("results")).await?,
@@ -200,8 +205,20 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+    let channels = generate_sim_nodes();
+    let graph = match SimGraph::new(channels.clone(), shutdown_trigger.clone()) {
+        Ok(graph) => Arc::new(Mutex::new(graph)),
+        Err(e) => anyhow::bail!("failed: {:?}", e),
+    };
+
+    let routing_graph = match populate_network_graph(channels) {
+        Ok(r) => r,
+        Err(e) => anyhow::bail!("failed: {:?}", e),
+    };
+
     let sim = Simulation::new(
-        clients,
+        ln_node_from_graph(graph.clone(), Arc::new(routing_graph)).await,
         validated_activities,
         cli.total_time,
         cli.expected_pmt_amt,
@@ -216,10 +233,92 @@ async fn main() -> anyhow::Result<()> {
         sim2.shutdown();
     })?;
 
+    // Run the simulation (blocking) until it exits. Once this happens, we can also wait for the simulated graph to
+    // shut down. Errors in either of these will universally trigger shutdown because we share a trigger, so it doesn't
+    // matter what order we wait for these.
     sim.run().await?;
+    graph.lock().await.wait_for_shutdown().await;
 
     Ok(())
 }
+
+fn generate_sim_nodes() -> Vec<SimulatedChannel> {
+    let capacity = 300000000;
+    let mut channels: Vec<SimulatedChannel> = vec![];
+    let (_, first_node) = get_random_keypair();
+
+    // Create channels in a ring so that we'll get long payment paths.
+    let mut node_1 = first_node;
+    for i in 0..10 {
+        // Create a new node that we'll create a channel with. If we're on the last node in the circle, we'll loop
+        // back around to the first node to close it.
+        let node_2 = if i == 10 {
+            first_node
+        } else {
+            let (_, pk) = get_random_keypair();
+            pk
+        };
+
+        let node_1_to_2 = ChannelPolicy {
+            pubkey: node_1,
+            max_htlc_count: 483,
+            max_in_flight_msat: capacity / 2,
+            min_htlc_size_msat: 1,
+            max_htlc_size_msat: capacity / 2,
+            cltv_expiry_delta: 40,
+            // Alter fee rate a little for different values.
+            base_fee: 1000 * i,
+            fee_rate_prop: 1500 * i,
+        };
+
+        let node_2_to_1 = ChannelPolicy {
+            pubkey: node_2,
+            max_htlc_count: 483,
+            max_in_flight_msat: capacity / 2,
+            min_htlc_size_msat: 1,
+            max_htlc_size_msat: capacity / 2,
+            cltv_expiry_delta: 40 + 10 * i as u32,
+            // Alter fee rate a little for different values.
+            base_fee: 2000 * i,
+            fee_rate_prop: i,
+        };
+
+        channels.push(SimulatedChannel::new(
+            capacity,
+            // Unique channel ID per link.
+            100 + i,
+            node_1_to_2,
+            node_2_to_1,
+        ));
+
+        // Once we've created this link in the circle, progress our current node to be node_1 so that we can generate
+        // a new edge.
+        node_1 = node_2;
+    }
+
+    channels
+}
+
+/// COPIED from test utils!
+pub fn get_random_bytes(size: usize) -> Vec<u8> {
+    rand::thread_rng()
+        .sample_iter(Uniform::new(u8::MIN, u8::MAX))
+        .take(size)
+        .collect()
+}
+
+pub fn get_random_int(s: u64, e: u64) -> u64 {
+    rand::thread_rng().gen_range(s..e)
+}
+
+pub fn get_random_keypair() -> (SecretKey, PublicKey) {
+    loop {
+        if let Ok(sk) = SecretKey::from_slice(&get_random_bytes(32)) {
+            return (sk, PublicKey::from_secret_key(&Secp256k1::new(), &sk));
+        }
+    }
+}
+/// COPIED from test utils!
 
 async fn read_sim_path(data_dir: PathBuf, sim_file: PathBuf) -> anyhow::Result<PathBuf> {
     let sim_path = if sim_file.is_relative() {

@@ -1692,6 +1692,7 @@ dependencies = [
  "ctrlc",
  "dialoguer",
  "log",
+ "rand",
  "serde",
  "serde_json",
  "sim-lib",
