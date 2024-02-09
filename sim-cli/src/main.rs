@@ -199,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let (shutdown_trigger, shutdown_listener) = triggered::trigger();
     let sim = Simulation::new(
         clients,
         validated_activities,
@@ -206,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
         cli.expected_pmt_amt,
         cli.capacity_multiplier,
         write_results,
+        (shutdown_trigger, shutdown_listener),
     );
     let sim2 = sim.clone();
 
