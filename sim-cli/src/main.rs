@@ -8,9 +8,7 @@ use rand::Rng;
 use sim_lib::{
     cln::ClnNode,
     lnd::LndNode,
-    sim_node::{
-        ln_node_from_graph, populate_network_graph, ChannelPolicy, SimGraph, SimulatedChannel,
-    },
+    sim_node::{ChannelPolicy, SimulatedChannel},
     ActivityDefinition, LightningError, LightningNode, NodeConnection, NodeId, SimParams,
     Simulation, WriteResults,
 };
@@ -204,28 +202,15 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let (shutdown_trigger, shutdown_listener) = triggered::trigger();
-
-    let channels = generate_sim_nodes();
-    let graph = match SimGraph::new(channels.clone(), shutdown_trigger.clone()) {
-        Ok(graph) => Arc::new(Mutex::new(graph)),
-        Err(e) => anyhow::bail!("failed: {:?}", e),
-    };
-
-    let routing_graph = match populate_network_graph(channels) {
-        Ok(r) => r,
-        Err(e) => anyhow::bail!("failed: {:?}", e),
-    };
-
-    let sim = Simulation::new(
-        ln_node_from_graph(graph.clone(), Arc::new(routing_graph)).await,
+    let (sim, graph) = Simulation::from_sim_channels(
+        generate_sim_nodes(),
         validated_activities,
         cli.total_time,
         cli.expected_pmt_amt,
         cli.capacity_multiplier,
         write_results,
-        (shutdown_trigger, shutdown_listener),
-    );
+    )
+    .await?;
     let sim2 = sim.clone();
 
     ctrlc::set_handler(move || {

@@ -6,6 +6,7 @@ use lightning::ln::features::NodeFeatures;
 use lightning::ln::PaymentHash;
 use random_activity::RandomActivityError;
 use serde::{Deserialize, Serialize};
+use sim_node::{SimGraph, SimulatedChannel};
 use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::marker::Send;
@@ -21,6 +22,7 @@ use triggered::{Listener, Trigger};
 
 use self::defined_activity::DefinedPaymentActivity;
 use self::random_activity::{NetworkGraphView, RandomPaymentActivity};
+use self::sim_node::{ln_node_from_graph, populate_network_graph};
 
 pub mod cln;
 mod defined_activity;
@@ -134,6 +136,8 @@ pub enum SimulationError {
     FileError,
     #[error("{0}")]
     RandomActivityError(RandomActivityError),
+    #[error("{0}")]
+    RandomGraphError(String),
 }
 
 #[derive(Debug, Error)]
@@ -368,18 +372,51 @@ impl Simulation {
         expected_payment_msat: u64,
         activity_multiplier: f64,
         write_results: Option<WriteResults>,
-        shutdown: (Trigger, Listener),
     ) -> Self {
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
         Self {
             nodes,
             activity,
-            shutdown_trigger: shutdown.0,
-            shutdown_listener: shutdown.1,
+            shutdown_trigger,
+            shutdown_listener,
             total_time: total_time.map(|x| Duration::from_secs(x as u64)),
             expected_payment_msat,
             activity_multiplier,
             write_results,
         }
+    }
+
+    pub async fn from_sim_channels(
+        channels: Vec<SimulatedChannel>,
+        activity: Vec<ActivityDefinition>,
+        total_time: Option<u32>,
+        expected_payment_msat: u64,
+        activity_multiplier: f64,
+        write_results: Option<WriteResults>,
+    ) -> Result<(Self, Arc<Mutex<SimGraph>>), SimulationError> {
+        let (shutdown_trigger, shutdown_listener) = triggered::trigger();
+
+        let sim_graph = SimGraph::new(channels.clone(), shutdown_trigger.clone())
+            .map(|graph| Arc::new(Mutex::new(graph)))
+            .map_err(|e| SimulationError::RandomGraphError(e.err))?;
+
+        let routing_graph = populate_network_graph(channels)
+            .map_err(|e| SimulationError::RandomGraphError(e.err))?;
+
+        Ok((
+            Self {
+                nodes: ln_node_from_graph(sim_graph.clone(), Arc::new(routing_graph)).await,
+                activity,
+                shutdown_trigger,
+                shutdown_listener,
+                total_time: total_time.map(|x| Duration::from_secs(x as u64)),
+                expected_payment_msat,
+                activity_multiplier,
+                write_results,
+            },
+            sim_graph.clone(),
+        ))
     }
 
     /// validate_activity validates that the user-provided activity description is achievable for the network that
